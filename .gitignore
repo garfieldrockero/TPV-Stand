@@ -1,1 +1,20 @@
+# Archivos originales / Original archives
 *.zip
+
+# Sistema operativo / OS
+.DS_Store
+Thumbs.db
+desktop.ini
+.directory
+*~
+
+# Editores / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local
+.claude/
+*.log
+.env
