@@ -13,6 +13,7 @@ A simple point-of-sale app for artists selling at fairs, markets and stands. It 
 ### Features
 
 - **Quick selling:** tap products to add them to the sale, or add a custom amount.
+- **Promotions**, of two kinds: a fixed bundle (1 print + 1 badge + 2 stickers for 16 €) and a pick-your-own deal (any 3 prints for 30 €, choosing which ones at the till). Selling one takes its items out of each product's stock, and it shows up as its own line in the summary and the CSV.
 - **Payment method:** cash, card or Bizum. For cash, it calculates the change.
 - **Stock control** (optional, per product). It won't let you sell more than you have, and warns when stock runs low.
 - **Events:** tag sales with the current fair or market to see what you earned at each one.
@@ -44,6 +45,7 @@ Una app sencilla de caja para artistas que venden en ferias, mercadillos y puest
 ### Funciones
 
 - **Venta rápida:** toca los productos para añadirlos a la venta, o añade un importe libre.
+- **Promociones**, de dos tipos: pack fijo (1 lámina + 1 chapa + 2 pegatinas por 16 €) y promoción a elegir (3 láminas cualesquiera por 30 €, eligiendo cuáles al cobrar). Al venderla se descuentan las unidades del stock de cada producto, y aparece como línea propia en el resumen y en el CSV.
 - **Método de pago:** efectivo, tarjeta o Bizum. En efectivo calcula el cambio.
 - **Control de stock** (opcional, por producto). No deja vender más de lo que hay y avisa cuando queda poco.
 - **Eventos:** asocia las ventas a la feria o mercado actual para ver cuánto ganaste en cada uno.

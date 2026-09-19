@@ -84,6 +84,7 @@ h3{font-size:1rem; margin:0}
 .t-name{font-weight:600; line-height:1.25; overflow-wrap:anywhere; padding-right:26px}
 .t-price{font-size:1.1rem; font-weight:700; font-variant-numeric:tabular-nums}
 .t-stock{font-size:.78rem; color:var(--muted)}
+.t-pack{font-size:.78rem; color:var(--muted); line-height:1.25; overflow-wrap:anywhere}
 .tile.out .t-stock{color:var(--danger); font-weight:600}
 .badge{
   position:absolute; top:8px; right:8px; min-width:26px; height:26px; border-radius:13px;
@@ -203,6 +204,8 @@ input[type=text],input:not([type]),input[inputmode],select{
 .prod .edit strong{display:block; overflow-wrap:anywhere}
 .prod .edit span{font-size:.9rem; color:var(--muted)}
 .low{color:var(--danger); font-weight:700}
+.field .prod{margin:6px 0 0; font-weight:400}
+.field .prod input[type=checkbox]{width:24px; height:24px; flex:none; accent-color:var(--accent)}
 
 .filters{display:flex; flex-direction:column; gap:8px; margin-bottom:14px}
 .banner{border:1px solid var(--warn); color:var(--warn); border-radius:12px; padding:10px 12px; margin-bottom:12px; font-size:.9rem}
@@ -340,17 +343,44 @@ function sanitize(d){
   if (!d || typeof d !== 'object' || !Array.isArray(d.products) || !Array.isArray(d.sales)) throw new Error('Formato no válido');
   const int = (n, min = 0) => Number.isInteger(n) && n >= min ? n : null;
   const str = (s, max = 200) => typeof s === 'string' ? s.slice(0, max) : '';
+  const partList = a => (Array.isArray(a) ? a : [])
+    .map(x => x && typeof x === 'object' ? {pid: str(x.pid, 40), qty: int(x.qty, 1) ?? 1, name: str(x.name, 60)} : null)
+    .filter(x => x && x.pid);
   const products = d.products.map((p, i) => {
     if (!p || typeof p !== 'object') throw new Error('Producto no válido');
     const price = int(p.price);
     if (!str(p.name) || price === null) throw new Error('Producto no válido');
-    return {id: str(p.id, 40) || uid(), name: str(p.name, 60), price, stock: int(p.stock), color: validColor(p.color) ? p.color : COLORS[i % COLORS.length]};
+    let pack = null;
+    if (p.pack && typeof p.pack === 'object'){
+      if (p.pack.type === 'choose'){
+        const options = (Array.isArray(p.pack.options) ? p.pack.options : []).map(x => str(x, 40)).filter(Boolean);
+        const pick = int(p.pack.pick, 1);
+        if (options.length && pick) pack = {type: 'choose', pick, options};
+      } else {
+        const items = partList(p.pack.items).map(({pid, qty}) => ({pid, qty}));
+        if (items.length) pack = {type: 'fixed', items};
+      }
+    }
+    const out = {id: str(p.id, 40) || uid(), name: str(p.name, 60), price,
+      stock: pack ? null : int(p.stock), color: validColor(p.color) ? p.color : COLORS[i % COLORS.length]};
+    if (pack) out.pack = pack;
+    return out;
   });
+  // Una promoción solo puede llevar productos sueltos que existan; si se queda sin
+  // ninguno, pasa a ser un producto normal en vez de perderse.
+  const loose = new Set(products.filter(p => !p.pack).map(p => p.id));
+  for (const p of products){
+    if (!p.pack) continue;
+    if (p.pack.type === 'fixed') p.pack.items = p.pack.items.filter(it => loose.has(it.pid));
+    else p.pack.options = p.pack.options.filter(pid => loose.has(pid));
+    if (!(p.pack.type === 'fixed' ? p.pack.items : p.pack.options).length) delete p.pack;
+  }
   const sales = d.sales.map(s => {
     if (!s || !Array.isArray(s.items) || !Number.isFinite(s.ts) || isNaN(new Date(s.ts))) throw new Error('Venta no válida');
     const items = s.items.map(it => {
       if (!it || typeof it !== 'object') throw new Error('Venta no válida');
-      return {pid: it.pid == null ? null : str(it.pid, 40), name: str(it.name, 80), price: int(it.price) ?? 0, qty: int(it.qty, 1) ?? 1};
+      return {pid: it.pid == null ? null : str(it.pid, 40), name: str(it.name, 80), price: int(it.price) ?? 0,
+        qty: int(it.qty, 1) ?? 1, parts: partList(it.parts)};
     });
     const out = {
       id: str(s.id, 40) || uid(), ts: s.ts, event: str(s.event, 80),
@@ -379,44 +409,91 @@ const cartQty = pid => ui.cart.filter(l => l.pid === pid).reduce((a, l) => a + l
 const cartTotal = () => ui.cart.reduce((a, l) => a + l.price * l.qty, 0);
 const cartUnits = () => ui.cart.reduce((a, l) => a + l.qty, 0);
 
-function canAddOne(pid){
-  const p = productById(pid);
-  if (!p || p.stock == null) return true;
-  if (cartQty(pid) >= p.stock){ toast(`No quedan más unidades de «${p.name}»`); return false; }
-  return true;
+const isPack = p => !!(p && p.pack);
+const partName = pt => pt.name || (productById(pt.pid) || {}).name || '?';
+const partsText = parts => (parts || []).map(pt => `${pt.qty}× ${partName(pt)}`).join(' + ');
+// Una línea lleva detalle cuando no es un producto suelto: gasta varios productos,
+// varias unidades, o unidades de un producto distinto.
+const hasDetail = l => (l.parts || []).some(pt => pt.pid !== l.pid || pt.qty > 1) || (l.parts || []).length > 1;
+// Descripción corta de una promoción para las fichas y los listados.
+const packText = p => p.pack.type === 'fixed'
+  ? partsText(p.pack.items)
+  : `Elige ${p.pack.pick} entre ${p.pack.options.length} productos`;
+
+// Unidades de cada producto ya comprometidas en la venta actual, sueltas o dentro de promociones.
+function cartUsage(){
+  const m = new Map();
+  for (const l of ui.cart) for (const pt of l.parts || []) m.set(pt.pid, (m.get(pt.pid) || 0) + pt.qty * l.qty);
+  return m;
+}
+// Cuántas veces más se puede vender una combinación de productos. Infinity = sin control de stock.
+function availFor(parts, usage = cartUsage()){
+  let min = Infinity;
+  for (const pt of parts){
+    const p = productById(pt.pid);
+    if (!p || p.stock == null || !pt.qty) continue;
+    min = Math.min(min, Math.floor((p.stock - (usage.get(pt.pid) || 0)) / pt.qty));
+  }
+  return min;
+}
+// En las promociones «elige N», lo que limita es el total de unidades disponibles entre las opciones.
+function availChoose(p, usage = cartUsage()){
+  let total = 0;
+  for (const pid of p.pack.options){
+    const q = productById(pid); if (!q) continue;
+    if (q.stock == null) return Infinity;
+    total += Math.max(0, q.stock - (usage.get(pid) || 0));
+  }
+  return Math.floor(total / p.pack.pick);
+}
+function unitsLeft(p, usage = cartUsage()){
+  if (isPack(p)) return p.pack.type === 'choose' ? availChoose(p, usage) : availFor(p.pack.items, usage);
+  return p.stock == null ? Infinity : p.stock - (usage.get(p.id) || 0);
+}
+// Qué unidades gasta del stock cada unidad vendida de este producto o promoción.
+function lineParts(p, chosen){
+  if (!isPack(p)) return [{pid: p.id, qty: 1, name: p.name}];
+  const src = p.pack.type === 'fixed' ? p.pack.items : chosen;
+  return src.map(it => ({pid: it.pid, qty: it.qty, name: partName(it)}));
+}
+function addLine(p, parts){
+  const same = ui.cart.find(l => l.pid === p.id && JSON.stringify(l.parts) === JSON.stringify(parts));
+  if (same) same.qty++;
+  else ui.cart.push({key: uid(), pid: p.id, name: p.name, price: p.price, qty: 1, parts});
+  buzz(); render();
 }
 function addToCart(pid){
   const p = productById(pid); if (!p) return;
-  if (!canAddOne(pid)) return;
-  const line = ui.cart.find(l => l.pid === pid);
-  if (line) line.qty++;
-  else ui.cart.push({key: uid(), pid, name: p.name, price: p.price, qty: 1});
-  buzz(); render();
+  if (isPack(p) && p.pack.type === 'choose'){ openSheet('choose', p, {sel: {}}); return; }
+  const parts = lineParts(p);
+  if (availFor(parts) < 1){ toast(`No quedan más unidades de «${p.name}»`); return; }
+  addLine(p, parts);
 }
 function changeLine(key, delta){
   const l = ui.cart.find(x => x.key === key); if (!l) return;
-  if (delta > 0 && l.pid && !canAddOne(l.pid)) return;
+  if (delta > 0 && availFor(l.parts || []) < 1){ toast(`No quedan más unidades de «${l.name}»`); return; }
   l.qty += delta;
   if (l.qty <= 0) ui.cart = ui.cart.filter(x => x !== l);
   render(); drawSheet();
 }
 function confirmSale(){
   if (!ui.cart.length) return;
-  for (const l of ui.cart){
-    const p = l.pid && productById(l.pid);
-    if (p && p.stock != null && cartQty(p.id) > p.stock){ toast(`No hay stock suficiente de «${p.name}»`); return; }
+  const usage = cartUsage();
+  for (const [pid, qty] of usage){
+    const p = productById(pid);
+    if (p && p.stock != null && qty > p.stock){ toast(`No hay stock suficiente de «${p.name}»`); return; }
   }
   const total = cartTotal();
   const sale = {
     id: uid(), ts: Date.now(), event: S.settings.currentEvent || '', method: ui.method,
-    items: ui.cart.map(({pid, name, price, qty}) => ({pid, name, price, qty})),
+    items: ui.cart.map(({pid, name, price, qty, parts}) => ({pid, name, price, qty, parts: parts || []})),
     total, note: ui.note.trim(),
   };
   const given = ui.method === 'efectivo' ? parseMoney(ui.given) : NaN;
   if (!isNaN(given) && given >= total) sale.given = given;
-  for (const l of ui.cart){
-    const p = l.pid && productById(l.pid);
-    if (p && p.stock != null) p.stock = Math.max(0, p.stock - l.qty);
+  for (const [pid, qty] of usage){
+    const p = productById(pid);
+    if (p && p.stock != null) p.stock = Math.max(0, p.stock - qty);
   }
   S.sales.push(sale); save();
   ui.cart = []; ui.given = ''; ui.note = '';
@@ -427,8 +504,12 @@ function deleteSale(id){
   const s = S.sales.find(x => x.id === id); if (!s) return;
   if (!confirm(`¿Borrar esta venta de ${money(s.total)}?\nSe devolverán las unidades al stock.`)) return;
   for (const it of s.items){
-    const p = it.pid && productById(it.pid);
-    if (p && p.stock != null) p.stock += it.qty;
+    // Las ventas antiguas no guardan el detalle: entonces la unidad es el propio producto.
+    const parts = it.parts && it.parts.length ? it.parts : (it.pid ? [{pid: it.pid, qty: 1}] : []);
+    for (const pt of parts){
+      const p = productById(pt.pid);
+      if (p && p.stock != null) p.stock += pt.qty * it.qty;
+    }
   }
   S.sales = S.sales.filter(x => x !== s); save(); render(); toast('Venta borrada');
 }
@@ -441,7 +522,7 @@ const SHEETS = {
     <h2>Venta actual</h2>
     ${ui.cart.length ? `<ul class="lines">${ui.cart.map(l => `
       <li>
-        <div class="l-info"><span>${esc(l.name)}</span><small>${money(l.price)} / ud.</small></div>
+        <div class="l-info"><span>${esc(l.name)}</span><small>${money(l.price)} / ud.${hasDetail(l) ? ` · ${esc(partsText(l.parts))}` : ''}</small></div>
         <div class="stepper">
           <button data-action="dec" data-key="${l.key}" aria-label="Quitar uno">−</button>
           <span>${l.qty}</span>
@@ -481,16 +562,46 @@ const SHEETS = {
       </div>
     </form>`;
   },
-  product(p){
-    const isNew = !p;
-    const d = p || {name: '', price: 0, stock: null, color: COLORS[S.products.length % COLORS.length]};
+  product(d){
+    const isNew = !d.id;
+    // Una promoción solo puede llevar productos sueltos, y nunca a sí misma.
+    const loose = S.products.filter(p => !p.pack && p.id !== d.id);
+    const TYPES = [['simple', 'Producto'], ['fixed', 'Pack fijo'], ['choose', 'A elegir']];
+    const title = {simple: 'producto', fixed: 'pack', choose: 'promoción'}[d.type];
     return `
-    <h2>${isNew ? 'Nuevo producto' : 'Editar producto'}</h2>
-    <form id="productForm" data-id="${isNew ? '' : esc(d.id)}">
-      <label class="field">Nombre<input name="name" required maxlength="60" autocomplete="off" value="${esc(d.name)}"></label>
-      <label class="field">Precio (€)<input name="price" inputmode="decimal" autocomplete="off" required placeholder="0,00" value="${isNew ? '' : centsToInput(d.price)}"></label>
+    <h2>${isNew ? 'Nuevo' : 'Editar'} ${title}</h2>
+    <form id="productForm" data-id="${esc(d.id || '')}">
+      <div class="seg" role="radiogroup" aria-label="Tipo">
+        ${TYPES.map(([t, l]) => `<button type="button" role="radio" aria-checked="${d.type === t}" data-action="ptype" data-t="${t}">${l}</button>`).join('')}
+      </div>
+      <label class="field">Nombre<input name="name" required maxlength="60" autocomplete="off" value="${esc(d.name)}"
+        placeholder="${d.type === 'simple' ? 'p. ej. Lámina A4' : d.type === 'fixed' ? 'p. ej. Pack regalo' : 'p. ej. 3 láminas a elegir'}"></label>
+      <label class="field">Precio ${d.type === 'simple' ? '' : 'de la promoción '}(€)<input name="price" inputmode="decimal" autocomplete="off" required placeholder="0,00" value="${esc(d.price)}"></label>
+      ${d.type === 'simple' ? `
       <label class="field">Unidades en stock <small>Déjalo vacío si no quieres controlar el stock de este producto.</small>
-        <input name="stock" inputmode="numeric" autocomplete="off" value="${d.stock == null ? '' : d.stock}"></label>
+        <input name="stock" inputmode="numeric" autocomplete="off" value="${esc(d.stock)}"></label>` : ''}
+      ${d.type === 'fixed' ? (loose.length ? `
+      <div class="field">Qué lleva el pack <small>Al venderlo se descuentan estas unidades del stock de cada producto.</small>
+        ${loose.map(p => `<div class="prod">
+          <span class="dot" style="--c:${p.color}"></span>
+          <span class="grow">${esc(p.name)}<span class="muted"> · ${money(p.price)}</span></span>
+          <div class="stepper">
+            <button type="button" data-action="pitem" data-id="${esc(p.id)}" data-d="-1" aria-label="Quitar uno de ${esc(p.name)}" ${d.items[p.id] ? '' : 'disabled'}>−</button>
+            <span>${d.items[p.id] || 0}</span>
+            <button type="button" data-action="pitem" data-id="${esc(p.id)}" data-d="1" aria-label="Añadir uno de ${esc(p.name)}">+</button>
+          </div>
+        </div>`).join('')}
+      </div>` : '<p class="muted">Crea antes los productos sueltos que quieres meter en el pack.</p>') : ''}
+      ${d.type === 'choose' ? (loose.length ? `
+      <label class="field">¿Cuántas unidades elige quien compra?
+        <input name="pick" inputmode="numeric" autocomplete="off" value="${esc(d.pick)}"></label>
+      <div class="field">Entre qué productos puede elegir
+        ${loose.map(p => `<label class="prod">
+          <input type="checkbox" name="opt" value="${esc(p.id)}" ${d.options.includes(p.id) ? 'checked' : ''}>
+          <span class="dot" style="--c:${p.color}"></span>
+          <span class="grow">${esc(p.name)}<span class="muted"> · ${money(p.price)}</span></span>
+        </label>`).join('')}
+      </div>` : '<p class="muted">Crea antes los productos entre los que se podrá elegir.</p>') : ''}
       <fieldset class="colors"><legend>Color</legend>
         ${COLORS.map(c => `<label><input type="radio" name="color" value="${c}" ${c === d.color ? 'checked' : ''}><span style="--c:${c}" aria-label="Color ${c}"></span></label>`).join('')}
       </fieldset>
@@ -500,6 +611,33 @@ const SHEETS = {
         <button class="btn primary">Guardar</button>
       </div>
     </form>`;
+  },
+  // Al vender una promoción «elige N»: marcar qué productos se lleva.
+  choose(p){
+    const sel = ui.sheet.sel || {};
+    const usage = cartUsage();
+    const picked = Object.values(sel).reduce((a, b) => a + b, 0);
+    return `
+    <h2>${esc(p.name)}</h2>
+    <p class="muted">Elige ${p.pack.pick} ${p.pack.pick === 1 ? 'unidad' : 'unidades'} · ${money(p.price)}</p>
+    <ul class="lines">${p.pack.options.map(pid => {
+      const q = productById(pid); if (!q) return '';
+      const taken = sel[pid] || 0;
+      const left = q.stock == null ? Infinity : q.stock - (usage.get(pid) || 0) - taken;
+      return `<li>
+        <div class="l-info"><span>${esc(q.name)}</span>${left === Infinity ? '' : `<small${left <= 0 ? ' class="warn"' : ''}>${left <= 0 ? 'No quedan' : `Quedan ${left}`}</small>`}</div>
+        <div class="stepper">
+          <button data-action="psel" data-id="${esc(pid)}" data-d="-1" aria-label="Quitar uno de ${esc(q.name)}" ${taken ? '' : 'disabled'}>−</button>
+          <span>${taken}</span>
+          <button data-action="psel" data-id="${esc(pid)}" data-d="1" aria-label="Añadir uno de ${esc(q.name)}" ${left <= 0 || picked >= p.pack.pick ? 'disabled' : ''}>+</button>
+        </div>
+      </li>`;
+    }).join('')}</ul>
+    <div class="total-row"><span>Elegidas</span><strong>${picked} / ${p.pack.pick}</strong></div>
+    <div class="sheet-actions">
+      <button class="btn ghost" data-action="close-sheet">Cancelar</button>
+      <button class="btn primary" data-action="pack-add" ${picked === p.pack.pick ? '' : 'disabled'}>Añadir ${money(p.price)}</button>
+    </div>`;
   },
   event(){
     const events = allEvents();
@@ -517,6 +655,32 @@ const SHEETS = {
     </form>`;
   },
 };
+// El formulario de producto se redibuja al cambiar de tipo, así que lo escrito
+// se guarda en un borrador en vez de perderse.
+function productDraft(p){
+  const d = {id: '', name: '', price: '', stock: '', color: COLORS[S.products.length % COLORS.length],
+    type: 'simple', items: {}, pick: '3', options: []};
+  if (!p) return d;
+  Object.assign(d, {id: p.id, name: p.name, price: centsToInput(p.price),
+    stock: p.stock == null ? '' : String(p.stock), color: p.color, type: p.pack ? p.pack.type : 'simple'});
+  if (p.pack && p.pack.type === 'fixed') for (const it of p.pack.items) d.items[it.pid] = it.qty;
+  if (p.pack && p.pack.type === 'choose'){ d.pick = String(p.pack.pick); d.options = [...p.pack.options]; }
+  return d;
+}
+function readDraft(){
+  const d = ui.sheet && ui.sheet.data, f = $('#productForm');
+  if (!d || !f) return d;
+  const el = n => f.elements[n];
+  d.name = el('name').value;
+  d.price = el('price').value;
+  if (el('stock')) d.stock = el('stock').value;
+  if (el('pick')) d.pick = el('pick').value;
+  const opts = [...f.querySelectorAll('[name=opt]')];
+  if (opts.length) d.options = opts.filter(c => c.checked).map(c => c.value);
+  const color = f.querySelector('[name=color]:checked');
+  if (color) d.color = color.value;
+  return d;
+}
 function openSheet(type, data, extra = {}){
   const wasOpen = !!ui.sheet;
   ui.sheet = {type, data, ...extra};
@@ -574,15 +738,17 @@ const VIEWS = {
         <p><button class="btn ghost small" data-action="free">o cobrar un importe libre</button></p></div>`;
       return;
     }
+    const usage = cartUsage();
     el.innerHTML = `<div class="grid">${S.products.map(p => {
       const inCart = cartQty(p.id);
-      const left = p.stock == null ? null : p.stock - inCart;
-      const out = left !== null && left <= 0;
+      const left = unitsLeft(p, usage);
+      const out = left <= 0;
       return `<button class="tile${out ? ' out' : ''}" style="--c:${p.color}" data-action="add" data-id="${esc(p.id)}">
         ${inCart ? `<span class="badge">${inCart}</span>` : ''}
         <span class="t-name">${esc(p.name)}</span>
+        ${isPack(p) ? `<span class="t-pack">${esc(packText(p))}</span>` : ''}
         <span class="t-price">${money(p.price)}</span>
-        ${left !== null ? `<span class="t-stock">${out ? 'Agotado' : `Quedan ${left}`}</span>` : ''}
+        ${left !== Infinity ? `<span class="t-stock">${out ? 'Agotado' : `Quedan ${left}`}</span>` : ''}
       </button>`;
     }).join('')}
       <button class="tile free" data-action="free">+ Importe libre</button>
@@ -607,7 +773,7 @@ const VIEWS = {
               <div><strong>${money(s.total)}</strong> <span class="pill">${METHOD_NAME[s.method]}</span></div>
               <button class="icon-btn" data-action="del-sale" data-id="${esc(s.id)}" aria-label="Borrar venta">🗑️</button>
             </div>
-            <div class="sale-items">${s.items.map(it => `${it.qty}× ${esc(it.name || 'Importe libre')}`).join(', ')}</div>
+            <div class="sale-items">${s.items.map(it => `${it.qty}× ${esc(it.name || 'Importe libre')}${hasDetail(it) ? ` <span class="muted">(${esc(partsText(it.parts))})</span>` : ''}`).join(', ')}</div>
             <div class="sale-meta">${timeStr(s.ts)}${s.event ? ' · ' + esc(s.event) : ''}${s.given != null ? ` · entregó ${money(s.given)}` : ''}${s.note ? ' · ' + esc(s.note) : ''}</div>
           </article>`).join('')}
       </section>`).join('');
@@ -697,7 +863,7 @@ const VIEWS = {
           <span class="dot" style="--c:${p.color}"></span>
           <button class="edit" data-action="edit-product" data-id="${esc(p.id)}">
             <strong>${esc(p.name)}</strong>
-            <span>${money(p.price)}${p.stock == null ? ' · sin control de stock' : ''}</span>
+            <span>${money(p.price)}${isPack(p) ? ` · ${esc(packText(p))}` : p.stock == null ? ' · sin control de stock' : ''}</span>
           </button>
           ${p.stock != null ? `<div class="stepper">
             <button data-action="stock" data-id="${esc(p.id)}" data-d="-1" aria-label="Restar una unidad">−</button>
@@ -770,9 +936,10 @@ function download(name, text, type){
 }
 function sortedSales(){ return [...S.sales].sort((a, b) => a.ts - b.ts); }
 function exportLines(){
-  const rows = [['Fecha', 'Hora', 'Evento', 'Id venta', 'Método de pago', 'Producto', 'Cantidad', 'Precio unidad (€)', 'Importe (€)', 'Nota']];
+  const rows = [['Fecha', 'Hora', 'Evento', 'Id venta', 'Método de pago', 'Producto', 'Contenido', 'Cantidad', 'Precio unidad (€)', 'Importe (€)', 'Nota']];
   for (const s of sortedSales()) for (const it of s.items)
-    rows.push([dayKey(s.ts), timeStr(s.ts), s.event, s.id, METHOD_NAME[s.method], it.name || 'Importe libre', it.qty, num(it.price), num(it.price * it.qty), s.note]);
+    rows.push([dayKey(s.ts), timeStr(s.ts), s.event, s.id, METHOD_NAME[s.method], it.name || 'Importe libre',
+      hasDetail(it) ? partsText(it.parts) : '', it.qty, num(it.price), num(it.price * it.qty), s.note]);
   download(`ventas-detalle-${fileDate()}.csv`, csv(rows), 'text/csv;charset=utf-8');
 }
 function exportSales(){
@@ -784,10 +951,16 @@ function exportSales(){
   download(`ventas-${fileDate()}.csv`, csv(rows), 'text/csv;charset=utf-8');
 }
 function exportProducts(){
-  const sold = new Map();
-  for (const s of S.sales) for (const it of s.items) if (it.pid) sold.set(it.pid, (sold.get(it.pid) || 0) + it.qty);
-  const rows = [['Producto', 'Precio (€)', 'Stock', 'Unidades vendidas (total)']];
-  for (const p of S.products) rows.push([p.name, num(p.price), p.stock == null ? 'sin control' : p.stock, sold.get(p.id) || 0]);
+  // Se cuentan tanto las ventas sueltas como las unidades que salieron dentro de promociones.
+  const sold = new Map(), inPack = new Map();
+  for (const s of S.sales) for (const it of s.items){
+    if (it.pid) sold.set(it.pid, (sold.get(it.pid) || 0) + it.qty);
+    for (const pt of it.parts || []) if (pt.pid !== it.pid) inPack.set(pt.pid, (inPack.get(pt.pid) || 0) + pt.qty * it.qty);
+  }
+  const rows = [['Producto', 'Precio (€)', 'Stock', 'Unidades vendidas (total)', 'Contenido', 'Unidades vendidas dentro de promociones']];
+  for (const p of S.products) rows.push([p.name, num(p.price),
+    isPack(p) ? 'promoción' : p.stock == null ? 'sin control' : p.stock,
+    sold.get(p.id) || 0, isPack(p) ? packText(p) : '', inPack.get(p.id) || 0]);
   download(`productos-${fileDate()}.csv`, csv(rows), 'text/csv;charset=utf-8');
 }
 function backupText(){ return JSON.stringify({...S, exportedAt: new Date().toISOString()}, null, 1); }
@@ -834,14 +1007,45 @@ document.addEventListener('click', e => {
       break;
     case 'close-sheet': closeSheet(); break;
     case 'del-sale': deleteSale(id); break;
-    case 'new-product': openSheet('product', null); break;
-    case 'edit-product': openSheet('product', productById(id)); break;
+    case 'new-product': openSheet('product', productDraft(null)); break;
+    case 'edit-product': openSheet('product', productDraft(productById(id))); break;
+    case 'ptype': { const d = readDraft(); if (d){ d.type = b.dataset.t; drawSheet(); } break; }
+    case 'pitem': {
+      const d = readDraft(); if (!d) break;
+      const q = Math.max(0, (d.items[id] || 0) + Number(b.dataset.d));
+      if (q) d.items[id] = q; else delete d.items[id];
+      drawSheet(); break;
+    }
+    case 'psel': {
+      const s = ui.sheet; if (!s || s.type !== 'choose') break;
+      const q = Math.max(0, (s.sel[id] || 0) + Number(b.dataset.d));
+      if (q) s.sel[id] = q; else delete s.sel[id];
+      drawSheet(); break;
+    }
+    case 'pack-add': {
+      const p = ui.sheet && ui.sheet.data;
+      if (!p || !isPack(p)) break;
+      const chosen = Object.entries(ui.sheet.sel).map(([pid, qty]) => ({pid, qty}));
+      closeSheet(); addLine(p, lineParts(p, chosen));
+      break;
+    }
     case 'del-product': {
       const p = productById(id);
-      if (p && confirm(`¿Borrar «${p.name}»?\nLas ventas ya registradas no se borran.`)){
+      // Al borrar un producto hay que sacarlo de las promociones que lo llevan.
+      const used = S.products.filter(x => x.pack && (x.pack.type === 'fixed'
+        ? x.pack.items.some(it => it.pid === id) : x.pack.options.includes(id)));
+      const warn = used.length ? `\nSe quitará de: ${used.map(x => x.name).join(', ')}.` : '';
+      if (p && confirm(`¿Borrar «${p.name}»?\nLas ventas ya registradas no se borran.${warn}`)){
         S.products = S.products.filter(x => x !== p);
-        ui.cart = ui.cart.filter(l => l.pid !== id);
-        save(); closeSheet(); render(); toast('Producto borrado');
+        for (const x of used){
+          if (x.pack.type === 'fixed') x.pack.items = x.pack.items.filter(it => it.pid !== id);
+          else x.pack.options = x.pack.options.filter(pid => pid !== id);
+          // Una promoción sin productos deja de serlo y queda como producto suelto.
+          if (!(x.pack.type === 'fixed' ? x.pack.items : x.pack.options).length) delete x.pack;
+        }
+        ui.cart = ui.cart.filter(l => l.pid !== id && !(l.parts || []).some(pt => pt.pid === id));
+        save(); closeSheet(); render();
+        toast(used.length ? 'Producto borrado y quitado de las promociones' : 'Producto borrado');
       }
       break;
     }
@@ -894,34 +1098,66 @@ document.addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target, fd = new FormData(f);
   if (f.id === 'productForm'){
-    const name = String(fd.get('name') || '').trim();
-    const price = parseMoney(fd.get('price'));
-    const stockRaw = String(fd.get('stock') || '').trim();
+    const d = readDraft();
+    const name = d.name.trim();
+    const price = parseMoney(d.price);
     if (!name) return toast('Pon un nombre');
     if (isNaN(price)) return toast('Precio no válido (ej. 12,50)');
-    let stock = null;
-    if (stockRaw !== ''){
-      if (!/^\d+$/.test(stockRaw)) return toast('El stock debe ser un número entero');
-      stock = Number(stockRaw);
+    let stock = null, pack = null;
+    if (d.type === 'simple'){
+      const stockRaw = d.stock.trim();
+      if (stockRaw !== ''){
+        if (!/^\d+$/.test(stockRaw)) return toast('El stock debe ser un número entero');
+        stock = Number(stockRaw);
+      }
+    } else if (d.type === 'fixed'){
+      const items = Object.entries(d.items).filter(([, q]) => q > 0).map(([pid, qty]) => ({pid, qty}));
+      if (!items.length) return toast('Elige qué productos lleva el pack');
+      pack = {type: 'fixed', items};
+    } else {
+      const pick = Number(d.pick.trim());
+      if (!/^\d+$/.test(d.pick.trim()) || pick < 1) return toast('¿Cuántas unidades se eligen? Pon un número');
+      if (!d.options.length) return toast('Marca entre qué productos se puede elegir');
+      pack = {type: 'choose', pick, options: [...d.options]};
     }
-    const color = validColor(fd.get('color')) ? fd.get('color') : COLORS[0];
+    const color = validColor(d.color) ? d.color : COLORS[0];
     const id = f.dataset.id;
+    // Una promoción no puede ir dentro de otra: si este producto se convierte en
+    // promoción, se quita de las que lo llevaban.
+    let freed = 0;
+    if (id && pack){
+      for (const x of S.products){
+        if (!x.pack || x.id === id) continue;
+        const before = x.pack.type === 'fixed' ? x.pack.items.length : x.pack.options.length;
+        if (x.pack.type === 'fixed') x.pack.items = x.pack.items.filter(it => it.pid !== id);
+        else x.pack.options = x.pack.options.filter(pid => pid !== id);
+        const after = x.pack.type === 'fixed' ? x.pack.items.length : x.pack.options.length;
+        if (before !== after) freed++;
+        if (!after) delete x.pack;
+      }
+    }
     if (id){
       const p = productById(id);
       if (p){
+        delete p.pack;
         Object.assign(p, {name, price, stock, color});
+        if (pack) p.pack = pack;
         ui.cart.forEach(l => { if (l.pid === id){ l.name = name; l.price = price; } });
       }
     } else {
-      S.products.push({id: uid(), name, price, stock, color});
+      const p = {id: uid(), name, price, stock, color};
+      if (pack) p.pack = pack;
+      S.products.push(p);
     }
-    save(); closeSheet(); render(); toast('Producto guardado');
+    save(); closeSheet(); render();
+    toast(freed ? 'Promoción guardada y quitada de otras promociones'
+      : pack ? 'Promoción guardada' : 'Producto guardado');
   }
   if (f.id === 'freeForm'){
     const price = parseMoney(fd.get('price'));
     if (isNaN(price) || price <= 0) return toast('Importe no válido (ej. 15,00)');
     const name = String(fd.get('name') || '').trim() || 'Importe libre';
-    ui.cart.push({key: uid(), pid: null, name, price, qty: 1});
+    ui.cart.push({key: uid(), pid: null, name, price, qty: 1, parts: []});
     buzz();
     if (ui.sheet && ui.sheet.returnTo) openSheet('checkout'); else closeSheet();
     render();

@@ -1,5 +1,5 @@
 // Service worker: la app funciona sin conexión (útil en ferias sin cobertura).
-const CACHE = 'tpv-artista-v1';
+const CACHE = 'tpv-artista-v2';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
