@@ -146,6 +146,9 @@ nav button[aria-current="page"] .ic{background:color-mix(in srgb,var(--accent) 2
 .seg button{border:0; background:none; border-radius:9px; padding:10px 4px; font-weight:600; min-height:44px}
 .seg button[aria-checked="true"]{background:var(--surface); box-shadow:var(--shadow); color:var(--accent)}
 .seg.four{grid-template-columns:repeat(4,1fr)}
+.seg.two{grid-template-columns:repeat(2,1fr)}
+.qrbox{display:grid; place-items:center; min-height:200px; margin:14px 0}
+.qrbox canvas{image-rendering:pixelated; border-radius:8px}
 
 .cash{margin-top:12px; padding:12px; border:1px solid var(--line); border-radius:12px}
 .quick{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px}
@@ -306,6 +309,181 @@ function toast(msg){
 }
 const buzz = () => { try { navigator.vibrate && navigator.vibrate(12); } catch(e){} };
 
+/* ================= Código QR =================
+   Generador propio (modo binario, corrección de errores L) para no depender de
+   ninguna librería externa: la app tiene que seguir funcionando sin conexión. */
+const QR = (() => {
+  const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+  for (let i = 0, x = 1; i < 255; i++){ EXP[i] = x; LOG[x] = i; x = (x << 1) ^ (x & 0x80 ? 0x11d : 0); }
+  for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  const mul = (a, b) => a && b ? EXP[LOG[a] + LOG[b]] : 0;
+  // Palabras de código totales, de corrección por bloque y número de bloques (nivel L).
+  const TOTAL = [26,44,70,100,134,172,196,242,292,346,404,466,532,581,655,733,815,901,991,1085,1156,1258,1364,1474,1588,1706,1828,1921,2051,2185,2323,2465,2611,2761,2876,3034,3196,3362,3532,3706];
+  const ECL   = [7,10,15,20,26,18,20,24,30,18,20,24,26,30,22,24,28,30,28,28,28,28,30,30,26,28,30,30,30,30,30,30,30,30,30,30,30,30,30,30];
+  const BLOCKS= [1,1,1,1,1,2,2,2,2,4,4,4,4,4,6,6,6,6,7,8,8,9,9,10,12,12,12,13,14,15,16,17,18,19,19,20,21,22,24,25];
+  const dataBytes = v => TOTAL[v-1] - ECL[v-1] * BLOCKS[v-1];
+
+  function rsGen(n){
+    let g = [1];
+    for (let i = 0; i < n; i++){
+      const ng = new Array(g.length + 1).fill(0);
+      for (let j = 0; j < g.length; j++){ ng[j] ^= g[j]; ng[j+1] ^= mul(g[j], EXP[i]); }
+      g = ng;
+    }
+    return g;
+  }
+  function ecFor(block, n){
+    const gen = rsGen(n), res = new Uint8Array(n);
+    for (const d of block){
+      const f = d ^ res[0];
+      res.copyWithin(0, 1); res[n-1] = 0;
+      if (f) for (let i = 0; i < n; i++) res[i] ^= mul(gen[i+1], f);
+    }
+    return res;
+  }
+  function alignPos(v){
+    if (v === 1) return [];
+    // La versión 32 es la única que no sigue la fórmula general.
+    const n = Math.floor(v / 7) + 2, last = v * 4 + 10, step = v === 32 ? 26 : Math.ceil((v * 4 + 4) / (n * 2 - 2)) * 2;
+    const pos = [6];
+    for (let i = n - 1; i > 0; i--) pos.push(last - (n - 1 - i) * step);
+    return pos.sort((a, b) => a - b);
+  }
+  const bch = (data, shift, gen, top) => {
+    let d = data << shift;
+    for (let i = top; i >= shift; i--) if ((d >> i) & 1) d ^= gen << (i - shift);
+    return d;
+  };
+  const formatBits = mask => (((8 | mask) << 10) | bch(8 | mask, 10, 0x537, 14)) ^ 0x5412;
+  const versionBits = v => (v << 12) | bch(v, 12, 0x1f25, 17);
+
+  function matrix(codewords, v, mask){
+    const size = v * 4 + 17;
+    const m = Array.from({length: size}, () => new Int8Array(size).fill(-1));
+    const finder = (r, c) => {
+      for (let i = -1; i <= 7; i++) for (let j = -1; j <= 7; j++){
+        const rr = r + i, cc = c + j;
+        if (rr < 0 || cc < 0 || rr >= size || cc >= size) continue;
+        const dark = i >= 0 && i <= 6 && j >= 0 && j <= 6 &&
+          (i === 0 || i === 6 || j === 0 || j === 6 || (i >= 2 && i <= 4 && j >= 2 && j <= 4));
+        m[rr][cc] = dark ? 1 : 0;
+      }
+    };
+    finder(0, 0); finder(0, size - 7); finder(size - 7, 0);
+    const ap = alignPos(v);
+    for (const r of ap) for (const c of ap){
+      if ((r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8)) continue;
+      for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++)
+        m[r+i][c+j] = Math.max(Math.abs(i), Math.abs(j)) !== 1 ? 1 : 0;
+    }
+    for (let i = 8; i < size - 8; i++){ m[6][i] = i % 2 ? 0 : 1; m[i][6] = i % 2 ? 0 : 1; }
+    m[size - 8][8] = 1;
+    for (let i = 0; i < 9; i++){ if (m[8][i] === -1) m[8][i] = 0; if (m[i][8] === -1) m[i][8] = 0; }
+    for (let i = 0; i < 8; i++){ if (m[8][size-1-i] === -1) m[8][size-1-i] = 0; if (m[size-1-i][8] === -1) m[size-1-i][8] = 0; }
+    if (v >= 7) for (let i = 0; i < 6; i++) for (let j = 0; j < 3; j++){ m[size-11+j][i] = 0; m[i][size-11+j] = 0; }
+    // Los huecos que quedan libres son los de datos: se anotan para poder enmascararlos.
+    const free = m.map(row => Array.from(row, val => val === -1));
+    let bi = 0;
+    const total = codewords.length * 8;
+    let upward = true;
+    for (let col = size - 1; col > 0; col -= 2){
+      if (col === 6) col--;
+      for (let k = 0; k < size; k++){
+        const row = upward ? size - 1 - k : k;
+        for (const c of [col, col - 1]){
+          if (!free[row][c]) continue;
+          m[row][c] = bi < total ? (codewords[bi >> 3] >> (7 - (bi & 7))) & 1 : 0;
+          bi++;
+        }
+      }
+      upward = !upward;
+    }
+    const MASKS = [
+      (r,c)=>(r+c)%2===0, (r,c)=>r%2===0, (r,c)=>c%3===0, (r,c)=>(r+c)%3===0,
+      (r,c)=>((r>>1)+Math.floor(c/3))%2===0, (r,c)=>((r*c)%2+(r*c)%3)===0,
+      (r,c)=>(((r*c)%2+(r*c)%3)%2)===0, (r,c)=>(((r+c)%2+(r*c)%3)%2)===0,
+    ];
+    for (let r = 0; r < size; r++) for (let c = 0; c < size; c++)
+      if (free[r][c] && MASKS[mask](r, c)) m[r][c] ^= 1;
+    // Formato: primera copia bajando por la columna 8 y siguiendo por la fila 8 hacia la
+    // izquierda; segunda copia repartida entre la fila 8 (derecha) y la columna 8 (abajo).
+    const fmt = formatBits(mask);
+    for (let i = 0; i < 15; i++){
+      const b = (fmt >> i) & 1;
+      if (i < 6) m[i][8] = b; else if (i === 6) m[7][8] = b;
+      else if (i === 7) m[8][8] = b; else if (i === 8) m[8][7] = b; else m[8][14-i] = b;
+      if (i < 8) m[8][size-1-i] = b; else m[size-15+i][8] = b;
+    }
+    if (v >= 7){
+      const vb = versionBits(v);
+      for (let i = 0; i < 18; i++){
+        const b = (vb >> i) & 1, r = Math.floor(i / 3), c = i % 3;
+        m[size-11+c][r] = b; m[r][size-11+c] = b;
+      }
+    }
+    return m;
+  }
+  // Reglas de penalización del estándar, para elegir la máscara que mejor se lee.
+  function penalty(m){
+    const size = m.length;
+    let p = 0, dark = 0;
+    const lines = [];
+    for (let i = 0; i < size; i++){ lines.push([...m[i]]); lines.push(m.map(r => r[i])); }
+    const PAT = [1,0,1,1,1,0,1,0,0,0,0], PATR = [0,0,0,0,1,0,1,1,1,0,1];
+    for (const line of lines){
+      let run = 1;
+      for (let j = 1; j < size; j++){
+        if (line[j] === line[j-1]) run++;
+        else { if (run >= 5) p += run - 2; run = 1; }
+      }
+      if (run >= 5) p += run - 2;
+      for (let j = 0; j + 11 <= size; j++){
+        if (PAT.every((v, k) => line[j+k] === v) || PATR.every((v, k) => line[j+k] === v)) p += 40;
+      }
+    }
+    for (let r = 0; r < size - 1; r++) for (let c = 0; c < size - 1; c++)
+      if (m[r][c] === m[r][c+1] && m[r][c] === m[r+1][c] && m[r][c] === m[r+1][c+1]) p += 3;
+    for (const row of m) for (const v of row) dark += v;
+    return p + Math.floor(Math.abs(dark * 100 / (size * size) - 50) / 5) * 10;
+  }
+  // Devuelve la matriz de módulos, o null si el texto no cabe ni en la versión 40.
+  return function encode(text){
+    const bytes = new TextEncoder().encode(text);
+    let v = 1;
+    while (v <= 40 && 4 + (v < 10 ? 8 : 16) + bytes.length * 8 > dataBytes(v) * 8) v++;
+    if (v > 40) return null;
+    const bits = [];
+    const push = (val, n) => { for (let i = n - 1; i >= 0; i--) bits.push((val >> i) & 1); };
+    push(4, 4); push(bytes.length, v < 10 ? 8 : 16);
+    for (const b of bytes) push(b, 8);
+    const capBits = dataBytes(v) * 8;
+    for (let i = 0; i < 4 && bits.length < capBits; i++) bits.push(0);
+    while (bits.length % 8) bits.push(0);
+    const data = [];
+    for (let i = 0; i < bits.length; i += 8) data.push(parseInt(bits.slice(i, i + 8).join(''), 2));
+    const PAD = [0xec, 0x11];
+    for (let i = 0; data.length < dataBytes(v); i++) data.push(PAD[i % 2]);
+    const nb = BLOCKS[v-1], ec = ECL[v-1], totalData = dataBytes(v);
+    const shortLen = Math.floor(totalData / nb), nShort = nb - (totalData % nb);
+    const blocks = [], ecs = [];
+    let off = 0;
+    for (let i = 0; i < nb; i++){
+      const len = shortLen + (i < nShort ? 0 : 1);
+      const blk = data.slice(off, off + len); off += len;
+      blocks.push(blk); ecs.push(ecFor(blk, ec));
+    }
+    const out = [];
+    for (let i = 0; i <= shortLen; i++) for (const b of blocks) if (i < b.length) out.push(b[i]);
+    for (let i = 0; i < ec; i++) for (const e of ecs) out.push(e[i]);
+    let best = null, bestP = Infinity;
+    for (let mask = 0; mask < 8; mask++){
+      const m = matrix(out, v, mask), p = penalty(m);
+      if (p < bestP){ bestP = p; best = m; }
+    }
+    return best;
+  };
+})();
+
 /* ================= Datos ================= */
 function freshState(){
   return {
@@ -396,6 +574,71 @@ function sanitize(d){
     settings: {shopName: str(st.shopName, 40) || 'Mi tienda', currentEvent: str(st.currentEvent, 80), lastBackup: typeof st.lastBackup === 'number' ? st.lastBackup : 0},
     products, sales,
   };
+}
+
+/* ================= Compartir entre móviles =================
+   Los datos viajan comprimidos dentro del propio enlace, detrás de «#»: esa parte
+   nunca se envía a internet, solo la lee la app del otro móvil. */
+const QR_MAX = 2900;   // lo que cabe en un código QR grande, con margen
+const b64url = bytes => {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+const fromB64url = str => {
+  const s = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, c => c.charCodeAt(0));
+};
+const pipeBytes = async (bytes, stream) =>
+  new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+
+async function packPayload(obj){
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  // «z» = comprimido; «j» = sin comprimir, para navegadores sin CompressionStream.
+  if (window.CompressionStream) return 'z' + b64url(await pipeBytes(bytes, new CompressionStream('deflate-raw')));
+  return 'j' + b64url(bytes);
+}
+async function unpackPayload(str){
+  if (str.length > 400000 || !/^[zj][A-Za-z0-9_-]+$/.test(str)) throw new Error('Enlace no válido');
+  let bytes = fromB64url(str.slice(1));
+  if (str[0] === 'z') bytes = await pipeBytes(bytes, new DecompressionStream('deflate-raw'));
+  if (bytes.length > 5e6) throw new Error('Demasiado grande');
+  return sanitize(JSON.parse(new TextDecoder().decode(bytes)));
+}
+function sharePayload(mode){
+  const settings = {shopName: S.settings.shopName, currentEvent: S.settings.currentEvent, lastBackup: 0};
+  return {v: 1, settings, products: S.products, sales: mode === 'all' ? S.sales : []};
+}
+
+// Junta en este móvil lo que llega de otro. Las ventas se reconocen por su
+// identificador, así que fusionar dos veces lo mismo no duplica nada.
+function mergeData(inc){
+  const byId = new Map(S.products.map(p => [p.id, p]));
+  let newProducts = 0, newSales = 0;
+  for (const p of inc.products){
+    if (byId.has(p.id)) continue;
+    S.products.push(p); byId.set(p.id, p); newProducts++;
+  }
+  // Por si en el otro móvil se creó una promoción con productos que aquí no había.
+  for (const p of S.products) if (p.pack){
+    if (p.pack.type === 'fixed') p.pack.items = p.pack.items.filter(it => byId.has(it.pid) && !byId.get(it.pid).pack);
+    else p.pack.options = p.pack.options.filter(pid => byId.has(pid) && !byId.get(pid).pack);
+    if (!(p.pack.type === 'fixed' ? p.pack.items : p.pack.options).length) delete p.pack;
+  }
+  const known = new Set(S.sales.map(s => s.id));
+  for (const s of inc.sales){
+    if (known.has(s.id)) continue;
+    S.sales.push(s); known.add(s.id); newSales++;
+    // Lo vendido en el otro móvil también ha salido del puesto: se descuenta del stock.
+    for (const it of s.items){
+      const parts = it.parts && it.parts.length ? it.parts : (it.pid ? [{pid: it.pid, qty: 1}] : []);
+      for (const pt of parts){
+        const p = byId.get(pt.pid);
+        if (p && p.stock != null) p.stock = Math.max(0, p.stock - pt.qty * it.qty);
+      }
+    }
+  }
+  return {newProducts, newSales};
 }
 
 let S = load() || freshState();
@@ -654,7 +897,85 @@ const SHEETS = {
       </div>
     </form>`;
   },
+  share(){
+    const s = ui.sheet, q = s.qr || {};
+    const MODES = [['cat', 'Solo productos'], ['all', 'Productos y ventas']];
+    return `
+    <h2>Compartir con otro móvil</h2>
+    <div class="seg two" role="radiogroup" aria-label="Qué compartir">
+      ${MODES.map(([m, l]) => `<button role="radio" aria-checked="${s.mode === m}" data-action="share-mode" data-m="${m}">${l}</button>`).join('')}
+    </div>
+    <div class="qrbox">${q.err ? `<p class="warn">${esc(q.err)}</p>`
+      : q.url ? '<canvas id="qrCanvas" role="img" aria-label="Código QR para compartir"></canvas>'
+      : '<p class="muted">Preparando el código…</p>'}</div>
+    ${q.url ? `<p class="muted" style="margin:0">Abre la cámara del otro móvil y apunta al código. Se abrirá la app y preguntará si quieres fusionar los datos.</p>` : ''}
+    <div class="sheet-actions">
+      <button class="btn ghost" data-action="close-sheet">Cerrar</button>
+      <button class="btn" data-action="copy-link" ${q.link ? '' : 'disabled'}>Copiar enlace</button>
+      ${navigator.share ? `<button class="btn primary" data-action="send-link" ${q.link ? '' : 'disabled'}>Enviar</button>` : ''}
+    </div>`;
+  },
+  incoming(d){
+    const knownSales = new Set(S.sales.map(s => s.id)), knownProducts = new Set(S.products.map(p => p.id));
+    const newSales = d.sales.filter(s => !knownSales.has(s.id)).length;
+    const newProducts = d.products.filter(p => !knownProducts.has(p.id)).length;
+    return `
+    <h2>Datos recibidos</h2>
+    <p>Llegan <strong>${d.products.length}</strong> productos y <strong>${d.sales.length}</strong> ventas.
+      De eso, <strong>${newProducts}</strong> productos y <strong>${newSales}</strong> ventas no están en este móvil.</p>
+    <div class="stack">
+      <button class="btn primary block" data-action="merge-data">Fusionar con lo que ya hay</button>
+      <button class="btn danger block" data-action="replace-data">Sustituir todo${S.sales.length ? ` (se borran las ${S.sales.length} ventas de este móvil)` : ''}</button>
+    </div>
+    <p class="muted" style="font-size:.85rem">Al fusionar se añaden las ventas y los productos que faltan, y el stock de este móvil baja según las ventas que llegan. Los productos que ya tienes se quedan como están. Fusionar dos veces lo mismo no duplica nada.</p>
+    <div class="sheet-actions"><button class="btn ghost" data-action="close-sheet">Cancelar</button></div>`;
+  },
 };
+// El enlace se genera aparte porque la compresión es asíncrona.
+async function prepareShare(mode){
+  const s = ui.sheet;
+  s.mode = mode; s.qr = {}; drawSheet();
+  let qr;
+  try {
+    const link = location.origin + location.pathname + '#s=' + await packPayload(sharePayload(mode));
+    qr = link.length <= QR_MAX ? {url: link, link}
+      : {link, err: mode === 'all'
+          ? 'Hay demasiadas ventas para caber en un código QR. Comparte solo los productos, o usa «Enviar» o el archivo de copia.'
+          : 'Hay demasiados productos para caber en un código QR. Usa «Enviar» o el archivo de copia.'};
+  } catch(e){ qr = {err: 'No se pudo preparar el código.'}; }
+  if (ui.sheet === s && s.mode === mode){ s.qr = qr; drawSheet(); }
+}
+function drawQR(canvas, text){
+  const m = QR(text);
+  if (!m) return;
+  // Cada módulo ocupa un número entero de píxeles reales para que el código salga nítido.
+  const quiet = 4, n = m.length + quiet * 2, dpr = window.devicePixelRatio || 1;
+  const css = Math.min(340, canvas.parentElement.clientWidth || 340);
+  const px = Math.max(1, Math.floor(css * dpr / n));
+  canvas.width = canvas.height = n * px;
+  canvas.style.width = canvas.style.height = (n * px / dpr) + 'px';
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, canvas.width, canvas.height);
+  g.fillStyle = '#000';
+  for (let r = 0; r < m.length; r++) for (let c = 0; c < m.length; c++)
+    if (m[r][c]) g.fillRect((c + quiet) * px, (r + quiet) * px, px, px);
+}
+async function copyText(text){
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch(e){
+    const t = document.createElement('textarea');
+    t.value = text; document.body.appendChild(t); t.select();
+    const ok = document.execCommand('copy'); t.remove(); return ok;
+  }
+}
+// Abrir la app con un enlace compartido: se lee lo que va detrás de «#s=» y se limpia la dirección.
+async function receiveFromLink(){
+  const m = location.hash.match(/^#s=([A-Za-z0-9_-]+)$/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  try { openSheet('incoming', await unpackPayload(m[1])); }
+  catch(e){ toast('Ese enlace no trae datos válidos de la app'); }
+}
 // El formulario de producto se redibuja al cambiar de tipo, así que lo escrito
 // se guarda en un borrador en vez de perderse.
 function productDraft(p){
@@ -693,13 +1014,20 @@ function drawSheet(){
   if (!ui.sheet) return;
   $('#sheetBody').innerHTML = SHEETS[ui.sheet.type](ui.sheet.data);
   $('#sheet').hidden = false;
+  const qr = ui.sheet.qr, canvas = $('#qrCanvas');
+  if (canvas && qr && qr.url) drawQR(canvas, qr.url);
 }
 function closeSheet(fromPop){
   if (!ui.sheet) return;
   ui.sheet = null; $('#sheet').hidden = true;
-  if (!fromPop && history.state && history.state.sheet) history.back();
+  if (!fromPop && history.state && history.state.sheet){ ui.ownBack = true; history.back(); }
 }
-addEventListener('popstate', () => closeSheet(true));
+// El «atrás» que lanza closeSheet llega más tarde: si entretanto se ha abierto otra
+// ventana, no hay que cerrarla.
+addEventListener('popstate', () => {
+  if (ui.ownBack){ ui.ownBack = false; return; }
+  closeSheet(true);
+});
 function changeHtml(){
   const total = cartTotal(), given = parseMoney(ui.given);
   if (isNaN(given)) return '';
@@ -897,12 +1225,20 @@ const VIEWS = {
         </div>
       </div>
       <div class="card">
+        <h3>Compartir con otro móvil</h3>
+        <p class="muted" style="margin-top:0">Para llevar el mismo puesto desde dos móviles: enseña el código QR y el otro lo escanea con la cámara. Las ventas se juntan sin duplicarse.</p>
+        <div class="stack">
+          <button class="btn block" data-action="share-qr">📱 Mostrar código QR</button>
+          <button class="btn ghost block" data-action="import">📂 Recibir desde un archivo</button>
+        </div>
+      </div>
+      <div class="card">
         <h3>Copia de seguridad</h3>
         <p class="muted" style="margin-top:0">Los datos se guardan solo en este móvil. Si se borran los datos de Chrome o se cambia de móvil, se pierden. Haz copias a menudo. Última copia: <strong>${esc(last)}</strong></p>
         <div class="stack">
           <button class="btn primary block" data-action="backup">💾 Descargar copia</button>
           ${canShare ? '<button class="btn block" data-action="share-backup">📤 Enviar copia (Drive, WhatsApp, correo…)</button>' : ''}
-          <button class="btn ghost block" data-action="import">📂 Restaurar una copia</button>
+          <button class="btn ghost block" data-action="import">📂 Restaurar o fusionar una copia</button>
         </div>
       </div>
       <div class="card">
@@ -974,11 +1310,10 @@ async function shareBackup(){
 $('#importFile').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
-  try {
-    const data = sanitize(JSON.parse(await f.text()));
-    if (!confirm(`La copia tiene ${data.products.length} productos y ${data.sales.length} ventas.\n¿Sustituir los datos actuales por los de la copia?`)) return;
-    S = data; ui.cart = []; save(); render(); toast('Copia restaurada');
-  } catch(err){ alert('Ese archivo no es una copia válida de esta app.'); }
+  let data;
+  try { data = sanitize(JSON.parse(await f.text())); }
+  catch(err){ alert('Ese archivo no es una copia válida de esta app.'); return; }
+  openSheet('incoming', data);
 });
 
 /* ================= Eventos ================= */
@@ -1072,6 +1407,34 @@ document.addEventListener('click', e => {
     case 'backup': backup(); break;
     case 'share-backup': shareBackup(); break;
     case 'import': $('#importFile').click(); break;
+    case 'share-qr': openSheet('share'); prepareShare('cat'); break;
+    case 'share-mode': if (ui.sheet && ui.sheet.mode !== b.dataset.m) prepareShare(b.dataset.m); break;
+    case 'copy-link': {
+      const link = ui.sheet && ui.sheet.qr && ui.sheet.qr.link;
+      if (link) copyText(link).then(ok => toast(ok ? 'Enlace copiado' : 'No se pudo copiar'));
+      break;
+    }
+    case 'send-link': {
+      const link = ui.sheet && ui.sheet.qr && ui.sheet.qr.link;
+      if (link) navigator.share({title: S.settings.shopName, text: 'Datos del puesto para TPV Stand', url: link})
+        .catch(err => { if (err && err.name !== 'AbortError') toast('No se pudo enviar; usa «Copiar enlace»'); });
+      break;
+    }
+    case 'merge-data': {
+      const d = ui.sheet && ui.sheet.data; if (!d) break;
+      const r = mergeData(d);
+      save(); closeSheet(); render();
+      toast(r.newSales || r.newProducts
+        ? `Fusionado: ${r.newProducts} productos y ${r.newSales} ventas nuevas`
+        : 'Ya estaba todo: no había nada nuevo');
+      break;
+    }
+    case 'replace-data': {
+      const d = ui.sheet && ui.sheet.data; if (!d) break;
+      if (S.sales.length && !confirm(`Se borrarán las ${S.sales.length} ventas de este móvil y se quedarán las recibidas. ¿Seguro?`)) break;
+      S = d; ui.cart = []; save(); closeSheet(); render(); toast('Datos sustituidos');
+      break;
+    }
     case 'wipe-sales':
       if (confirm('¿Borrar TODAS las ventas? Esto no se puede deshacer.\n(El stock no se modifica.)') && confirm('¿Seguro? Te recomendamos descargar antes una copia.')){
         S.sales = []; save(); render(); toast('Ventas borradas');
@@ -1180,6 +1543,9 @@ addEventListener('storage', e => {
 });
 
 render();
+receiveFromLink();
+// Si la app ya estaba abierta y se abre otro enlace compartido.
+addEventListener('hashchange', receiveFromLink);
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')){
   navigator.serviceWorker.register('sw.js').catch(() => {});

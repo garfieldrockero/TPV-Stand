@@ -20,6 +20,7 @@ A simple point-of-sale app for artists selling at fairs, markets and stands. It 
 - **Summary:** total earned, number of sales, units, average ticket, best-selling products, and breakdowns by payment method, day and event.
 - **CSV export** for Excel: detailed sales, sales per ticket, and products with stock.
 - **Backups:** download or share a JSON copy and restore it on any device.
+- **One stand, two phones:** show a QR code and the other phone scans it with its camera. The data travels inside the link itself, after the `#`, a part that browsers never send to any server. The receiving phone can merge or replace. When merging, sales are matched by their ID, so doing it twice never duplicates anything, and the other phone's sales are taken off the local stock. Backup files can be merged the same way.
 - **Works offline** once opened, and can be installed on your phone like an app.
 
 ### Privacy
@@ -52,6 +53,7 @@ Una app sencilla de caja para artistas que venden en ferias, mercadillos y puest
 - **Resumen:** total ganado, número de ventas, unidades, ticket medio, productos más vendidos y desglose por método de pago, día y evento.
 - **Exportar a CSV** para Excel: ventas detalladas, ventas por ticket, y productos con su stock.
 - **Copias de seguridad:** descarga o comparte una copia en JSON y restáurala en cualquier dispositivo.
+- **Un puesto, dos móviles:** enseña un código QR y el otro móvil lo escanea con la cámara. Los datos viajan dentro del propio enlace, detrás del `#`, una parte que el navegador nunca envía a ningún servidor. El móvil que los recibe elige entre fusionar o sustituir. Al fusionar, las ventas se reconocen por su identificador, así que hacerlo dos veces no duplica nada, y las ventas del otro móvil se descuentan del stock. Los archivos de copia también se pueden fusionar.
 - **Funciona sin conexión** una vez abierta, y se puede instalar en el móvil como una app.
 
 ### Privacidad
