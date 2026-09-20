@@ -15,6 +15,8 @@ A simple point-of-sale app for artists selling at fairs, markets and stands. It 
 - **Quick selling:** tap products to add them to the sale, or add a custom amount.
 - **Promotions**, of two kinds: a fixed bundle (1 print + 1 badge + 2 stickers for 16 €) and a pick-your-own deal (any 3 prints for 30 €, choosing which ones at the till). Selling one takes its items out of each product's stock, and it shows up as its own line in the summary and the CSV.
 - **Payment method:** cash, card or Bizum. For cash, it calculates the change.
+- **Trades with other artists:** swapping work for work is recorded as a trade. It comes off your stock like any sale, but never counts as money earned: it gets its own card in the summary, with the units traded and what they were worth, and the CSV shows 0 as money taken.
+- **Stand fee per event:** write down what the table costs and the summary shows a bar with how much is left to cover it and, once covered, what you actually made. The fee can be added to an event already under way, and it applies to that same event without touching the sales already recorded.
 - **Stock control** (optional, per product). It won't let you sell more than you have, and warns when stock runs low.
 - **Events:** tag sales with the current fair or market to see what you earned at each one.
 - **Summary:** total earned, number of sales, units, average ticket, best-selling products, and breakdowns by payment method, day and event.
@@ -48,6 +50,8 @@ Una app sencilla de caja para artistas que venden en ferias, mercadillos y puest
 - **Venta rápida:** toca los productos para añadirlos a la venta, o añade un importe libre.
 - **Promociones**, de dos tipos: pack fijo (1 lámina + 1 chapa + 2 pegatinas por 16 €) y promoción a elegir (3 láminas cualesquiera por 30 €, eligiendo cuáles al cobrar). Al venderla se descuentan las unidades del stock de cada producto, y aparece como línea propia en el resumen y en el CSV.
 - **Método de pago:** efectivo, tarjeta o Bizum. En efectivo calcula el cambio.
+- **Trueques con otros artistas:** cambiar obra por obra se registra como trueque. Sale del stock como cualquier venta, pero nunca cuenta como dinero ganado: tiene su propia tarjeta en el resumen, con las unidades intercambiadas y lo que valían, y en el CSV aparece con 0 de dinero cobrado.
+- **Coste de la mesa por evento:** apunta lo que cuesta el puesto y el resumen enseña una barra con lo que falta para cubrirlo y, una vez cubierto, lo que se gana de verdad. Se puede apuntar con el evento ya empezado, y se aplica a ese mismo evento sin tocar las ventas ya registradas.
 - **Control de stock** (opcional, por producto). No deja vender más de lo que hay y avisa cuando queda poco.
 - **Eventos:** asocia las ventas a la feria o mercado actual para ver cuánto ganaste en cada uno.
 - **Resumen:** total ganado, número de ventas, unidades, ticket medio, productos más vendidos y desglose por método de pago, día y evento.

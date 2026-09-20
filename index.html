@@ -270,8 +270,12 @@ const METHODS = [
   {id:'efectivo', label:'💶 Efectivo'},
   {id:'tarjeta',  label:'💳 Tarjeta'},
   {id:'bizum',    label:'📱 Bizum'},
+  {id:'trueque',  label:'🤝 Trueque'},
 ];
-const METHOD_NAME = {efectivo:'Efectivo', tarjeta:'Tarjeta', bizum:'Bizum'};
+const METHOD_NAME = {efectivo:'Efectivo', tarjeta:'Tarjeta', bizum:'Bizum', trueque:'Trueque'};
+// Un trueque saca género del puesto pero no entra dinero: cuenta para el stock, no para lo ganado.
+const PAID = ['efectivo', 'tarjeta', 'bizum'];
+const isTrade = s => s.method === 'trueque';
 
 /* ================= Utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -489,6 +493,7 @@ function freshState(){
   return {
     v: 1,
     settings: {shopName: 'Mi tienda', currentEvent: '', lastBackup: 0},
+    eventCosts: {},   // lo que cuesta la mesa de cada evento (en céntimos, como el resto del dinero)
     products: SEED_PRODUCTS.map((p, i) => ({
       id: uid() + i, name: p.name, price: p.price, stock: p.stock ?? null,
       color: validColor(p.color) ? p.color : COLORS[i % COLORS.length],
@@ -569,10 +574,17 @@ function sanitize(d){
     return out;
   });
   const st = d.settings || {};
+  const eventCosts = {};
+  if (d.eventCosts && typeof d.eventCosts === 'object'){
+    for (const [name, cents] of Object.entries(d.eventCosts)){
+      const key = str(name, 80), value = int(cents);
+      if (key && value) eventCosts[key] = value;
+    }
+  }
   return {
     v: 1,
     settings: {shopName: str(st.shopName, 40) || 'Mi tienda', currentEvent: str(st.currentEvent, 80), lastBackup: typeof st.lastBackup === 'number' ? st.lastBackup : 0},
-    products, sales,
+    products, sales, eventCosts,
   };
 }
 
@@ -607,7 +619,7 @@ async function unpackPayload(str){
 }
 function sharePayload(mode){
   const settings = {shopName: S.settings.shopName, currentEvent: S.settings.currentEvent, lastBackup: 0};
-  return {v: 1, settings, products: S.products, sales: mode === 'all' ? S.sales : []};
+  return {v: 1, settings, eventCosts: S.eventCosts, products: S.products, sales: mode === 'all' ? S.sales : []};
 }
 
 // Junta en este móvil lo que llega de otro. Las ventas se reconocen por su
@@ -625,6 +637,8 @@ function mergeData(inc){
     else p.pack.options = p.pack.options.filter(pid => byId.has(pid) && !byId.get(pid).pack);
     if (!(p.pack.type === 'fixed' ? p.pack.items : p.pack.options).length) delete p.pack;
   }
+  for (const [name, cents] of Object.entries(inc.eventCosts || {}))
+    if (!S.eventCosts[name]) S.eventCosts[name] = cents;
   const known = new Set(S.sales.map(s => s.id));
   for (const s of inc.sales){
     if (known.has(s.id)) continue;
@@ -741,7 +755,8 @@ function confirmSale(){
   S.sales.push(sale); save();
   ui.cart = []; ui.given = ''; ui.note = '';
   closeSheet(); render();
-  toast(`✅ Venta registrada: ${money(total)}` + (sale.given != null ? ` · cambio ${money(sale.given - total)}` : ''));
+  toast(isTrade(sale) ? `🤝 Trueque registrado (${money(total)} en género)`
+    : `✅ Venta registrada: ${money(total)}` + (sale.given != null ? ` · cambio ${money(sale.given - total)}` : ''));
 }
 function deleteSale(id){
   const s = S.sales.find(x => x.id === id); if (!s) return;
@@ -775,9 +790,10 @@ const SHEETS = {
       </li>`).join('')}</ul>` : '<p class="muted">No hay nada en la venta.</p>'}
     <button class="btn ghost small" data-action="free">+ Importe libre</button>
     <div class="total-row"><span>Total</span><strong>${money(total)}</strong></div>
-    <div class="seg" role="radiogroup" aria-label="Método de pago">
+    <div class="seg four" role="radiogroup" aria-label="Método de pago">
       ${METHODS.map(m => `<button role="radio" aria-checked="${ui.method === m.id}" data-action="method" data-m="${m.id}">${m.label}</button>`).join('')}
     </div>
+    ${ui.method === 'trueque' ? '<p class="muted" style="margin:10px 0 0">Intercambio con otro artista: sale del stock, pero no cuenta como dinero ganado.</p>' : ''}
     ${ui.method === 'efectivo' ? `
     <div class="cash">
       <label>Entregado <input id="given" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(ui.given)}"></label>
@@ -787,10 +803,10 @@ const SHEETS = {
       </div>
       <div class="change" id="change">${changeHtml()}</div>
     </div>` : ''}
-    <label class="field">Nota (opcional)<input id="note" autocomplete="off" maxlength="200" value="${esc(ui.note)}" placeholder="p. ej. encargo, nombre del cliente…"></label>
+    <label class="field">${ui.method === 'trueque' ? '¿Con quién? (opcional)' : 'Nota (opcional)'}<input id="note" autocomplete="off" maxlength="200" value="${esc(ui.note)}" placeholder="${ui.method === 'trueque' ? 'p. ej. Marta, del puesto de al lado' : 'p. ej. encargo, nombre del cliente…'}"></label>
     <div class="sheet-actions">
       <button class="btn ghost" data-action="clear-cart">Vaciar</button>
-      <button class="btn primary" data-action="confirm-sale" ${ui.cart.length ? '' : 'disabled'}>Cobrar ${money(total)}</button>
+      <button class="btn primary" data-action="confirm-sale" ${ui.cart.length ? '' : 'disabled'}>${ui.method === 'trueque' ? 'Registrar trueque' : `Cobrar ${money(total)}`}</button>
     </div>`;
   },
   free(){
@@ -890,9 +906,24 @@ const SHEETS = {
     <form id="eventForm">
       <label class="field">Nombre del evento<input name="event" list="eventList" maxlength="80" autocomplete="off" value="${esc(S.settings.currentEvent)}" placeholder="p. ej. Mercadillo de Navidad"></label>
       <datalist id="eventList">${events.map(e => `<option value="${esc(e)}">`).join('')}</datalist>
+      <label class="field">Lo que cuesta la mesa (€) <small>Opcional. En el resumen verás cuánto falta para cubrirla y lo que ganas de verdad.</small>
+        <input name="cost" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(eventCost(S.settings.currentEvent) ? centsToInput(eventCost(S.settings.currentEvent)) : '')}"></label>
       ${events.length ? `<div class="quick">${events.slice(0, 6).map(e => `<button type="button" data-action="pick-event" data-ev="${esc(e)}">${esc(e)}</button>`).join('')}</div>` : ''}
       <div class="sheet-actions">
         <button type="button" class="btn ghost" data-action="no-event">Sin evento</button>
+        <button class="btn primary">Guardar</button>
+      </div>
+    </form>`;
+  },
+  // Cambiar lo que cuesta la mesa de un evento sin tener que ponerlo como evento actual.
+  cost(name){
+    return `
+    <h2>Mesa de «${esc(name)}»</h2>
+    <form id="costForm" data-ev="${esc(name)}">
+      <label class="field">Lo que cuesta la mesa (€) <small>Déjalo vacío si no pagas por el puesto.</small>
+        <input name="cost" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(eventCost(name) ? centsToInput(eventCost(name)) : '')}"></label>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-action="close-sheet">Cancelar</button>
         <button class="btn primary">Guardar</button>
       </div>
     </form>`;
@@ -1034,6 +1065,10 @@ function changeHtml(){
   if (given < total) return `<span class="warn">Faltan ${money(total - given)}</span>`;
   return `Cambio: <strong>${money(given - total)}</strong>`;
 }
+const eventCost = name => (name && S.eventCosts[name]) || 0;
+// Lo que se ha ingresado en un evento, contando todas sus fechas: la mesa se
+// cubre con lo de toda la feria, no solo con lo de hoy.
+const eventIncome = name => S.sales.reduce((a, s) => a + (s.event === name && !isTrade(s) ? s.total : 0), 0);
 function allEvents(){
   const seen = new Map();
   for (const s of [...S.sales].sort((a, b) => b.ts - a.ts)) if (s.event && !seen.has(s.event)) seen.set(s.event, 1);
@@ -1094,11 +1129,11 @@ const VIEWS = {
     }
     el.innerHTML = [...groups].map(([k, list]) => `
       <section class="day">
-        <header><h3>${esc(dayLabel(k))}</h3><span>${money(list.reduce((a, s) => a + s.total, 0))}</span></header>
+        <header><h3>${esc(dayLabel(k))}</h3><span>${money(list.reduce((a, s) => a + (isTrade(s) ? 0 : s.total), 0))}</span></header>
         ${list.map(s => `
           <article class="sale">
             <div class="sale-top">
-              <div><strong>${money(s.total)}</strong> <span class="pill">${METHOD_NAME[s.method]}</span></div>
+              <div><strong>${isTrade(s) ? '🤝' : money(s.total)}</strong> <span class="pill">${METHOD_NAME[s.method]}${isTrade(s) ? ` · ${money(s.total)} en género` : ''}</span></div>
               <button class="icon-btn" data-action="del-sale" data-id="${esc(s.id)}" aria-label="Borrar venta">🗑️</button>
             </div>
             <div class="sale-items">${s.items.map(it => `${it.qty}× ${esc(it.name || 'Importe libre')}${hasDetail(it) ? ` <span class="muted">(${esc(partsText(it.parts))})</span>` : ''}`).join(', ')}</div>
@@ -1118,13 +1153,18 @@ const VIEWS = {
       month: new Date(now.getFullYear(), now.getMonth(), 1).getTime(),
       all: 0,
     }[ui.period];
-    const sales = S.sales.filter(s => s.ts >= start &&
+    const inView = S.sales.filter(s => s.ts >= start &&
       (ui.eventFilter === '__all' || (ui.eventFilter === '__none' ? !s.event : s.event === ui.eventFilter)));
+    // Los trueques van aparte: sacan género pero no traen dinero.
+    const sales = inView.filter(s => !isTrade(s));
+    const trades = inView.filter(isTrade);
     const total = sales.reduce((a, s) => a + s.total, 0);
     const units = sales.reduce((a, s) => a + s.items.reduce((b, it) => b + it.qty, 0), 0);
+    const tradeUnits = trades.reduce((a, s) => a + s.items.reduce((b, it) => b + it.qty, 0), 0);
+    const tradeValue = trades.reduce((a, s) => a + s.total, 0);
     const byMethod = {efectivo: 0, tarjeta: 0, bizum: 0};
     const byMethodN = {efectivo: 0, tarjeta: 0, bizum: 0};
-    const byProd = new Map(), byDay = new Map(), byEvent = new Map();
+    const byProd = new Map(), byDay = new Map(), byEvent = new Map(), tradedProd = new Map();
     for (const s of sales){
       byMethod[s.method] += s.total; byMethodN[s.method]++;
       byDay.set(dayKey(s.ts), (byDay.get(dayKey(s.ts)) || 0) + s.total);
@@ -1136,11 +1176,42 @@ const VIEWS = {
         r.qty += it.qty; r.amount += it.qty * it.price; byProd.set(name, r);
       }
     }
+    for (const s of trades) for (const it of s.items){
+      const name = it.name || 'Importe libre';
+      tradedProd.set(name, (tradedProd.get(name) || 0) + it.qty);
+    }
     const pct = v => total ? Math.round(v / total * 100) : 0;
     const top = [...byProd].sort((a, b) => b[1].amount - a[1].amount || b[1].qty - a[1].qty);
     const low = S.products.filter(p => p.stock != null && p.stock <= 2);
     const periods = [['today', 'Hoy'], ['week', '7 días'], ['month', 'Mes'], ['all', 'Todo']];
     const backupOld = S.sales.length && Date.now() - (S.settings.lastBackup || 0) > 7 * 864e5;
+    // Mesa del evento: se cubre con lo ingresado en todo el evento, no solo en el periodo elegido.
+    const oneEvent = ui.eventFilter !== '__all' && ui.eventFilter !== '__none' ? ui.eventFilter
+      : ui.eventFilter === '__all' && S.settings.currentEvent ? S.settings.currentEvent : '';
+    const cost = eventCost(oneEvent);
+    const earned = oneEvent ? eventIncome(oneEvent) : 0;
+    const covered = cost && earned >= cost;
+    const tableCard = !oneEvent ? '' : `
+      <div class="card">
+        <h3>Mesa de «${esc(oneEvent)}»</h3>
+        ${cost ? `
+          <div class="row"><span class="grow">Cuesta</span><span class="num">${money(cost)}</span></div>
+          <div class="row"><span class="grow">Ingresado en este evento</span><span class="num">${money(earned)}</span></div>
+          <div class="bar" style="height:10px;margin:10px 0"><i style="width:${Math.min(100, Math.round(earned / cost * 100))}%;background:${covered ? 'var(--ok)' : 'var(--warn)'}"></i></div>
+          <div class="row"><span class="grow">${covered ? '✅ Mesa cubierta · beneficio' : `Faltan para cubrirla`}</span>
+            <strong class="num" style="color:${covered ? 'var(--ok)' : 'var(--warn)'}">${money(covered ? earned - cost : cost - earned)}</strong></div>
+          ${ui.period !== 'all' && oneEvent ? '<p class="muted" style="font-size:.8rem;margin:6px 0 0">Cuenta todas las ventas del evento, aunque arriba estés viendo otro periodo.</p>' : ''}
+          <button class="btn ghost small block" style="margin-top:10px" data-action="event-cost" data-ev="${esc(oneEvent)}">Cambiar lo que cuesta la mesa</button>
+        ` : `
+          <p class="muted" style="margin-top:0">No has apuntado lo que cuesta la mesa de este evento.</p>
+          <button class="btn block" data-action="event-cost" data-ev="${esc(oneEvent)}">Apuntar lo que cuesta la mesa</button>`}
+      </div>`;
+    const tradeCard = !trades.length ? '' : `
+      <div class="card">
+        <h3>🤝 Trueques con otros artistas</h3>
+        <p class="muted" style="margin-top:0">${trades.length} ${trades.length === 1 ? 'trueque' : 'trueques'} · ${tradeUnits} ${tradeUnits === 1 ? 'unidad' : 'unidades'} · valen ${money(tradeValue)} a precio de venta. No cuentan como dinero ganado, pero sí han salido del stock.</p>
+        ${[...tradedProd].sort((a, b) => b[1] - a[1]).map(([name, qty]) => `<div class="row"><span class="grow">${esc(name)}</span><span class="num muted">${qty} ud.</span></div>`).join('')}
+      </div>`;
 
     el.innerHTML = `
       ${backupOld ? `<div class="banner">💾 ${S.settings.lastBackup ? 'Hace más de una semana que no haces' : 'Aún no has hecho'} una copia de seguridad. <button class="btn small ghost" data-action="goto-settings">Hacer copia</button></div>` : ''}
@@ -1161,9 +1232,11 @@ const VIEWS = {
         <div class="kpi"><span>Ticket medio</span><strong>${money(sales.length ? Math.round(total / sales.length) : 0)}</strong></div>
         <div class="kpi"><span>Venta mayor</span><strong>${money(sales.reduce((m, s) => Math.max(m, s.total), 0))}</strong></div>
       </div>
+      ${tableCard}
+      ${tradeCard}
       ${sales.length ? `
       <div class="card"><h3>Por método de pago</h3>
-        ${METHODS.map(m => `<div class="row"><div class="grow">${m.label} <small class="muted">(${byMethodN[m.id]})</small>
+        ${METHODS.filter(m => PAID.includes(m.id)).map(m => `<div class="row"><div class="grow">${m.label} <small class="muted">(${byMethodN[m.id]})</small>
           <div class="bar"><i style="width:${pct(byMethod[m.id])}%"></i></div></div>
           <span class="num">${money(byMethod[m.id])}</span></div>`).join('')}
       </div>
@@ -1171,7 +1244,11 @@ const VIEWS = {
         ${top.map(([name, r]) => `<div class="row"><span class="grow">${esc(name)}</span><span class="num muted">${r.qty} ud.</span><span class="num">${money(r.amount)}</span></div>`).join('')}
       </div>
       ${ui.eventFilter === '__all' && byEvent.size > 1 ? `<div class="card"><h3>Por evento</h3>
-        ${[...byEvent].sort((a, b) => b[1] - a[1]).map(([e, v]) => `<div class="row"><span class="grow">${esc(e)}</span><span class="num">${money(v)}</span></div>`).join('')}
+        ${[...byEvent].sort((a, b) => b[1] - a[1]).map(([e, v]) => {
+          const c = eventCost(e);
+          return `<div class="row"><div class="grow">${esc(e)}${c ? `<br><small class="muted">mesa ${money(c)} · ${eventIncome(e) >= c ? `beneficio ${money(eventIncome(e) - c)}` : `faltan ${money(c - eventIncome(e))}`}</small>` : ''}</div>
+            <span class="num">${money(v)}</span></div>`;
+        }).join('')}
       </div>` : ''}
       ${byDay.size > 1 ? `<div class="card"><h3>Por día</h3>
         ${[...byDay].sort((a, b) => b[0].localeCompare(a[0])).map(([d, v]) => `<div class="row"><span class="grow" style="text-transform:capitalize">${esc(dayLabel(d))}</span><span class="num">${money(v)}</span></div>`).join('')}
@@ -1272,18 +1349,20 @@ function download(name, text, type){
 }
 function sortedSales(){ return [...S.sales].sort((a, b) => a.ts - b.ts); }
 function exportLines(){
-  const rows = [['Fecha', 'Hora', 'Evento', 'Id venta', 'Método de pago', 'Producto', 'Contenido', 'Cantidad', 'Precio unidad (€)', 'Importe (€)', 'Nota']];
+  const rows = [['Fecha', 'Hora', 'Evento', 'Id venta', 'Método de pago', 'Producto', 'Contenido', 'Cantidad', 'Precio unidad (€)', 'Importe (€)', 'Dinero cobrado (€)', 'Nota']];
   for (const s of sortedSales()) for (const it of s.items)
     rows.push([dayKey(s.ts), timeStr(s.ts), s.event, s.id, METHOD_NAME[s.method], it.name || 'Importe libre',
-      hasDetail(it) ? partsText(it.parts) : '', it.qty, num(it.price), num(it.price * it.qty), s.note]);
+      hasDetail(it) ? partsText(it.parts) : '', it.qty, num(it.price), num(it.price * it.qty),
+      isTrade(s) ? '0,00' : num(it.price * it.qty), s.note]);
   download(`ventas-detalle-${fileDate()}.csv`, csv(rows), 'text/csv;charset=utf-8');
 }
 function exportSales(){
-  const rows = [['Fecha', 'Hora', 'Evento', 'Id venta', 'Método de pago', 'Artículos', 'Unidades', 'Total (€)', 'Entregado (€)', 'Nota']];
+  const rows = [['Fecha', 'Hora', 'Evento', 'Coste mesa (€)', 'Id venta', 'Método de pago', 'Artículos', 'Unidades', 'Total (€)', 'Dinero cobrado (€)', 'Entregado (€)', 'Nota']];
   for (const s of sortedSales())
-    rows.push([dayKey(s.ts), timeStr(s.ts), s.event, s.id, METHOD_NAME[s.method],
+    rows.push([dayKey(s.ts), timeStr(s.ts), s.event, eventCost(s.event) ? num(eventCost(s.event)) : '', s.id, METHOD_NAME[s.method],
       s.items.map(it => `${it.qty}x ${it.name || 'Importe libre'}`).join(', '),
-      s.items.reduce((a, it) => a + it.qty, 0), num(s.total), s.given != null ? num(s.given) : '', s.note]);
+      s.items.reduce((a, it) => a + it.qty, 0), num(s.total), isTrade(s) ? '0,00' : num(s.total),
+      s.given != null ? num(s.given) : '', s.note]);
   download(`ventas-${fileDate()}.csv`, csv(rows), 'text/csv;charset=utf-8');
 }
 function exportProducts(){
@@ -1397,7 +1476,16 @@ document.addEventListener('click', e => {
       break;
     }
     case 'event': openSheet('event'); break;
-    case 'pick-event': { const inp = $('#eventForm [name=event]'); if (inp) inp.value = b.dataset.ev; break; }
+    case 'pick-event': {
+      const f = $('#eventForm');
+      if (f){
+        f.elements.event.value = b.dataset.ev;
+        const c = eventCost(b.dataset.ev);
+        f.elements.cost.value = c ? centsToInput(c) : '';
+      }
+      break;
+    }
+    case 'event-cost': openSheet('cost', b.dataset.ev); break;
     case 'no-event': S.settings.currentEvent = ''; save(); closeSheet(); render(); toast('Sin evento'); break;
     case 'period': ui.period = b.dataset.p; render(); break;
     case 'goto-settings': ui.view = 'settings'; render(); scrollTo(0, 0); break;
@@ -1442,7 +1530,7 @@ document.addEventListener('click', e => {
       break;
     case 'wipe-all':
       if (confirm('¿Borrar TODO: ventas y productos? Esto no se puede deshacer.') && confirm('¿Seguro? Te recomendamos descargar antes una copia.')){
-        S = freshState(); S.products = []; ui.cart = []; save(); render(); toast('Todo borrado');
+        S = freshState(); S.products = []; S.eventCosts = {}; ui.cart = []; save(); render(); toast('Todo borrado');
       }
       break;
   }
@@ -1525,10 +1613,25 @@ document.addEventListener('submit', e => {
     if (ui.sheet && ui.sheet.returnTo) openSheet('checkout'); else closeSheet();
     render();
   }
-  if (f.id === 'eventForm'){
-    S.settings.currentEvent = String(fd.get('event') || '').trim().slice(0, 80);
+  if (f.id === 'costForm'){
+    const name = f.dataset.ev, raw = String(fd.get('cost') || '').trim();
+    const cost = raw === '' ? 0 : parseMoney(raw);
+    if (isNaN(cost)) return toast('El coste de la mesa no es válido (ej. 40,00)');
+    if (cost) S.eventCosts[name] = cost; else delete S.eventCosts[name];
     save(); closeSheet(); render();
-    toast(S.settings.currentEvent ? `Evento: ${S.settings.currentEvent}` : 'Sin evento');
+    toast(cost ? `Mesa de «${name}»: ${money(cost)}` : 'Mesa sin coste');
+  }
+  if (f.id === 'eventForm'){
+    const name = String(fd.get('event') || '').trim().slice(0, 80);
+    const costRaw = String(fd.get('cost') || '').trim();
+    const cost = costRaw === '' ? 0 : parseMoney(costRaw);
+    if (isNaN(cost)) return toast('El coste de la mesa no es válido (ej. 40,00)');
+    S.settings.currentEvent = name;
+    if (name){
+      if (cost) S.eventCosts[name] = cost; else delete S.eventCosts[name];
+    }
+    save(); closeSheet(); render();
+    toast(name ? `Evento: ${name}${cost ? ` · mesa ${money(cost)}` : ''}` : 'Sin evento');
   }
 });
 
